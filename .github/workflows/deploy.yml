@@ -1,0 +1,76 @@
+name: Deploy to AlwaysData
+
+on:
+  push:
+    branches:
+      - main
+
+# Only the repo owner can trigger this via push/merge to main
+# Branch protection rules must be configured in GitHub repo settings
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Build Next.js
+        run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+          NEXTAUTH_URL: ${{ secrets.NEXTAUTH_URL }}
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ALWAYSDATA_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.ALWAYSDATA_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy via SSH
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.ALWAYSDATA_USER }}@${{ secrets.ALWAYSDATA_HOST }} << 'EOF'
+            set -e
+            cd ${{ secrets.ALWAYSDATA_PROJECT_PATH }}
+            git pull origin main
+            npm ci --production
+            npx prisma generate
+            npx prisma migrate deploy
+            npm run build
+            # Restart Node.js process
+            touch tmp/restart.txt
+          EOF
+        env:
+          ALWAYSDATA_HOST: ${{ secrets.ALWAYSDATA_HOST }}
+          ALWAYSDATA_USER: ${{ secrets.ALWAYSDATA_USER }}
+
+      - name: Notify on success
+        if: success()
+        run: echo "Deploy completed successfully"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "Deploy failed — check logs above"
